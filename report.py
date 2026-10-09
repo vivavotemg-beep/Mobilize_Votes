@@ -238,6 +238,70 @@ def build_scatter(df, nome_c1, nome_c2):
     )
     return f"<section>{_fig_html(fig)}</section>"
 
+def build_perfil(df: pd.DataFrame) -> str:
+    """Seção de perfil do eleitorado, se as colunas existirem."""
+    cols = [c for c in df.columns if c.startswith("perfil_")]
+    if not cols:
+        return (
+            "<section><h3>Perfil do eleitorado</h3>"
+            "<p>CSV sem colunas de perfil. Rode <code>main.py --perfil</code> "
+            "para gerar.</p></section>"
+        )
+
+    total = int(df["perfil_total"].sum())
+
+    def _pct(col: str) -> float:
+        if col not in df.columns or total == 0:
+            return 0.0
+        return df[col].sum() / total * 100
+
+    # Cabeçalho com KPIs
+    html = ["<section>", "<h3>Perfil do eleitorado (TSE)</h3>",
+            "<p class='desc'>Composição demográfica das seções analisadas, "
+            "segundo o Perfil do Eleitorado por Seção Eleitoral do TSE.</p>",
+            "<div class='kpis'>"]
+    html.append(_kpi_row("Total de eleitores", f"{total:,}"))
+    html.append(_kpi_row("Mulheres", f"{_pct('perfil_genero_feminino'):.1f}%"))
+    html.append(_kpi_row("Jovens 16–24", f"{_pct('perfil_jovens_16_24'):.1f}%"))
+    html.append(_kpi_row("Idosos 60+", f"{_pct('perfil_idosos_60_mais'):.1f}%"))
+    html.append(_kpi_row("PCD", f"{_pct('perfil_pcd'):.1f}%"))
+    html.append("</div>")
+
+    # Distribuição por faixa etária
+    cols_idade = [c for c in df.columns
+                  if c.startswith("perfil_idade_") and c.endswith("_pct")]
+    if cols_idade:
+        agregado = df[cols_idade].multiply(df["perfil_total"], axis=0).sum()
+        resumo = (agregado / agregado.sum() * 100).reset_index()
+        resumo.columns = ["faixa", "pct"]
+        resumo["faixa"] = (resumo["faixa"]
+                           .str.replace("perfil_idade_", "", regex=False)
+                           .str.replace("_pct", "", regex=False))
+        fig = px.bar(resumo, x="faixa", y="pct",
+                     labels={"faixa": "Faixa etária", "pct": "% do eleitorado"},
+                     height=350,
+                     title="Distribuição por faixa etária")
+        html.append(_fig_html(fig))
+
+    # Grau de instrução
+    cols_ins = [c for c in df.columns
+                if c.startswith("perfil_instrucao_") and c.endswith("_pct")]
+    if cols_ins:
+        agregado = df[cols_ins].multiply(df["perfil_total"], axis=0).sum()
+        resumo = (agregado / agregado.sum() * 100).reset_index()
+        resumo.columns = ["grau", "pct"]
+        resumo["grau"] = (resumo["grau"]
+                          .str.replace("perfil_instrucao_", "", regex=False)
+                          .str.replace("_pct", "", regex=False))
+        resumo = resumo.sort_values("pct")
+        fig = px.bar(resumo, x="pct", y="grau", orientation="h",
+                     labels={"pct": "% do eleitorado", "grau": ""},
+                     height=350,
+                     title="Grau de instrução")
+        html.append(_fig_html(fig))
+
+    html.append("</section>")
+    return "\n".join(html)
 
 def build_footer():
     return """
@@ -372,6 +436,7 @@ def main():
     print("[5/6] Heatmap e dispersão...")
     html.append(build_heatmap(df))
     html.append(build_scatter(df, nome_c1, nome_c2))
+    html.append(build_perfil(df))
 
     print("[6/6] Rodapé...")
     html.append(build_footer())

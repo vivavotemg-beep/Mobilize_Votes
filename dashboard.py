@@ -232,9 +232,9 @@ k5.metric("Válidos por apto", f"{vpa:.1f}%")
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
     ["🎯 Onde mobilizar", "🗺️ Mapa geográfico", "🔥 Heatmap por seção",
-     "📊 Comparação", "📋 Tabela"]
+     "📊 Comparação", "📈 Perfil do eleitorado", "📋 Tabela"]
 )
 
 # ---------------- Tab 1: priority ----------------
@@ -543,9 +543,115 @@ with tab4:
         height=500,
     )
     st.plotly_chart(fig5, use_container_width=True)
-
-# ---------------- Tab 5: table ----------------
+# ---------------- Tab 5: perfil do eleitorado ----------------
 with tab5:
+    st.subheader("Perfil do eleitorado")
+    st.markdown(
+        "Composição demográfica das seções filtradas, segundo o **Perfil do "
+        "eleitorado por seção eleitoral** do TSE. Colunas geradas quando o "
+        "`main.py` roda com `--perfil`."
+    )
+
+    colunas_perfil = [c for c in df.columns if c.startswith("perfil_")]
+    if not colunas_perfil:
+        st.warning(
+            "Este CSV não tem colunas de perfil. Rode o `main.py` com "
+            "`--perfil` para gerar, ou use um CSV já enriquecido."
+        )
+    else:
+        # --- KPIs agregados ---
+        total = int(df["perfil_total"].sum())
+        pct_fem = (df["perfil_genero_feminino"].sum() / total * 100
+                   if "perfil_genero_feminino" in df else 0)
+        pct_jov = (df["perfil_jovens_16_24"].sum() / total * 100
+                   if "perfil_jovens_16_24" in df else 0)
+        pct_ido = (df["perfil_idosos_60_mais"].sum() / total * 100
+                   if "perfil_idosos_60_mais" in df else 0)
+        pct_pcd = (df["perfil_pcd"].sum() / total * 100
+                   if "perfil_pcd" in df else 0)
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Total de eleitores", f"{total:,}")
+        k2.metric("Mulheres", f"{pct_fem:.1f}%")
+        k3.metric("Jovens 16–24", f"{pct_jov:.1f}%")
+        k4.metric("Idosos 60+", f"{pct_ido:.1f}%")
+        k5.metric("PCD", f"{pct_pcd:.1f}%")
+
+        # --- Faixa etária ---
+        st.markdown("**Distribuição por faixa etária**")
+        cols_idade = [c for c in df.columns
+                      if c.startswith("perfil_idade_") and c.endswith("_pct")]
+        if cols_idade:
+            agregado = df[cols_idade].multiply(df["perfil_total"], axis=0).sum()
+            resumo = (agregado / agregado.sum() * 100).reset_index()
+            resumo.columns = ["faixa", "pct"]
+            resumo["faixa"] = resumo["faixa"].str.replace(
+                "perfil_idade_", "", regex=False).str.replace("_pct", "", regex=False)
+            fig_idade = px.bar(
+                resumo, x="faixa", y="pct",
+                labels={"faixa": "Faixa etária", "pct": "% do eleitorado"},
+                height=380,
+            )
+            st.plotly_chart(fig_idade, use_container_width=True)
+
+        # --- Gênero ---
+        cols_gen = [c for c in df.columns
+                    if c.startswith("perfil_genero_") and c.endswith("_pct")]
+        if cols_gen:
+            agregado = df[cols_gen].multiply(df["perfil_total"], axis=0).sum()
+            resumo = (agregado / agregado.sum() * 100).reset_index()
+            resumo.columns = ["genero", "pct"]
+            resumo["genero"] = resumo["genero"].str.replace(
+                "perfil_genero_", "", regex=False).str.replace("_pct", "", regex=False)
+            fig_gen = px.pie(resumo, names="genero", values="pct",
+                             height=380, hole=0.4)
+            st.plotly_chart(fig_gen, use_container_width=True)
+
+        # --- Instrução ---
+        st.markdown("**Grau de instrução**")
+        cols_ins = [c for c in df.columns
+                    if c.startswith("perfil_instrucao_") and c.endswith("_pct")]
+        if cols_ins:
+            agregado = df[cols_ins].multiply(df["perfil_total"], axis=0).sum()
+            resumo = (agregado / agregado.sum() * 100).reset_index()
+            resumo.columns = ["grau", "pct"]
+            resumo["grau"] = resumo["grau"].str.replace(
+                "perfil_instrucao_", "", regex=False).str.replace("_pct", "", regex=False)
+            resumo = resumo.sort_values("pct", ascending=True)
+            fig_ins = px.bar(resumo, x="pct", y="grau", orientation="h",
+                             labels={"pct": "% do eleitorado", "grau": ""},
+                             height=380)
+            st.plotly_chart(fig_ins, use_container_width=True)
+
+        # --- Top 15 seções por % de jovens (onde abstenção tende a ser maior) ---
+        if "perfil_jovens_16_24_pct" in df.columns:
+            st.markdown("**Top 15 seções por % de jovens (16–24)**")
+            top_jov = df.sort_values("perfil_jovens_16_24_pct",
+                                     ascending=False).head(15)
+            cols_mostrar = ["zona", "secao", "local_votacao",
+                            "perfil_total", "perfil_jovens_16_24_pct",
+                            "abstencao_pct", "prioridade_mobilizacao"]
+            cols_mostrar = [c for c in cols_mostrar if c in top_jov.columns]
+            st.dataframe(top_jov[cols_mostrar], width="stretch",
+                         hide_index=True)
+
+        # --- Correlação visual: abstenção × % de jovens ---
+        if "perfil_jovens_16_24_pct" in df.columns and "abstencao_pct" in df.columns:
+            st.markdown("**Abstenção × % de jovens**")
+            fig_corr = px.scatter(
+                df, x="perfil_jovens_16_24_pct", y="abstencao_pct",
+                size="perfil_total", color="prioridade_mobilizacao",
+                hover_data=["zona", "secao", "local_votacao",
+                            "perfil_total", "aptos"],
+                color_continuous_scale="Reds",
+                labels={"perfil_jovens_16_24_pct": "% de jovens (16–24)",
+                        "abstencao_pct": "Abstenção (%)",
+                        "prioridade_mobilizacao": "Prioridade"},
+                height=500,
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+# ---------------- Tab 6: table ----------------
+with tab6:
     st.subheader("Tabela completa")
     st.dataframe(df, width="stretch", hide_index=True)
     st.download_button(
