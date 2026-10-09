@@ -46,7 +46,6 @@ def _cache_path(ano: int, uf: str, cache_dir: Optional[str] = None) -> str:
 
 def _filtrar_recursos_locais(resources: list, uf: str) -> list:
     """Escolhe o recurso 'Eleitorado por local de votação' do dataset."""
-    # Preferência explícita: nome contendo "local de votação" ou "locais_votacao"
     pref = [
         r for r in resources
         if ("local de votação" in r.get("name", "").lower()
@@ -56,7 +55,6 @@ def _filtrar_recursos_locais(resources: list, uf: str) -> list:
     ]
     if pref:
         return pref
-    # Senão, qualquer coisa com "local"
     com_local = [
         r for r in resources
         if "local" in r.get("name", "").lower()
@@ -90,7 +88,6 @@ def _download_locais(ano: int, uf: str) -> Optional[pd.DataFrame]:
 
     recursos_filtrados = _filtrar_recursos_locais(resources, uf)
 
-    # Prefere ZIPs; senão CSV
     zips = [r for r in recursos_filtrados
             if r.get("url", "").lower().endswith(".zip")]
     csvs = [r for r in recursos_filtrados
@@ -105,22 +102,25 @@ def _download_locais(ano: int, uf: str) -> Optional[pd.DataFrame]:
 
     if url.lower().endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            csvs_in_zip = [n for n in zf.namelist() if n.lower().endswith(".csv")]
             uf_up = uf.upper()
-            matches = [n for n in csvs
-                       if f"_{uf_up}." in n.upper() or n.upper().endswith(f"_{uf_up}.CSV")]
-            escolhido = matches[0] if matches else csvs[0]
+            matches = [n for n in csvs_in_zip
+                       if f"_{uf_up}." in n.upper()
+                       or n.upper().endswith(f"_{uf_up}.CSV")]
+            escolhido = matches[0] if matches else csvs_in_zip[0]
             print(f"[geodata] csv dentro do zip: {escolhido} "
-                  f"(de {len(csvs)} disponíveis)", file=sys.stderr)
+                  f"(de {len(csvs_in_zip)} disponíveis)", file=sys.stderr)
             with zf.open(escolhido) as fb:
                 text = io.TextIOWrapper(fb, encoding="latin-1")
                 return pd.read_csv(text, sep=";", dtype=str, low_memory=False)
 
+    return pd.read_csv(io.BytesIO(raw), sep=";", dtype=str, low_memory=False)
+
 
 def obter_coordenadas(ano: int, uf: str,
                       cache_dir: Optional[str] = None) -> Optional[pd.DataFrame]:
-    """Retorna DataFrame com CD_MUNICIPIO, NR_ZONA, NR_LOCAL_VOTACAO,
-    NR_LATITUDE, NR_LONGITUDE — já filtrado pela UF.
+    """Retorna DataFrame com CD_MUNICIPIO, NM_MUNICIPIO, NR_ZONA,
+    NR_LOCAL_VOTACAO, NR_LATITUDE, NR_LONGITUDE — já filtrado pela UF.
 
     Faz cache em disco. Retorna None se não conseguir obter o dataset.
     """
@@ -133,7 +133,6 @@ def obter_coordenadas(ano: int, uf: str,
 
     df = _download_locais(ano, uf)
 
-    # Se falhou e não é 2022, tenta 2022 como aproximação
     if df is None and ano != 2022:
         print(f"[geodata] {ano} falhou, tentando 2022 como fallback...",
               file=sys.stderr)
@@ -159,6 +158,7 @@ def obter_coordenadas(ano: int, uf: str,
     # ---- Normaliza nomes de coluna ----
     colmap = {
         "CD_MUNICIPIO": ["CD_MUNICIPIO"],
+        "NM_MUNICIPIO": ["NM_MUNICIPIO"],           # <- novo
         "NR_ZONA": ["NR_ZONA", "ZONA"],
         "NR_LOCAL_VOTACAO": ["NR_LOCAL_VOTACAO", "NR_LOCAL", "COD_LOCAL",
                              "CD_LOCAL_VOTACAO"],
@@ -169,12 +169,18 @@ def obter_coordenadas(ano: int, uf: str,
         "DS_ENDERECO": ["DS_ENDERECO"],
         "NM_BAIRRO": ["NM_BAIRRO"],
     }
+    # Colunas que podem faltar sem quebrar
+    opcionais = {
+        "NM_LOCAL_VOTACAO", "DS_ENDERECO", "NM_BAIRRO",
+        "CD_MUNICIPIO", "NM_MUNICIPIO",
+    }
+
     keep = {}
     for canonical, options in colmap.items():
         found = next((o for o in options if o in df.columns), None)
         if not found:
-            if canonical in ("NM_LOCAL_VOTACAO", "DS_ENDERECO", "NM_BAIRRO"):
-                continue  # opcionais
+            if canonical in opcionais:
+                continue
             print(f"[geodata] coluna '{canonical}' não encontrada "
                   f"(tentei {options})", file=sys.stderr)
             print(f"[geodata] colunas disponíveis: {list(df.columns)}",
@@ -183,10 +189,10 @@ def obter_coordenadas(ano: int, uf: str,
         keep[canonical] = df[found].astype(str)
 
     out = pd.DataFrame(keep)
-    # Normaliza vírgula decimal nas coordenadas
     for c in ("NR_LATITUDE", "NR_LONGITUDE"):
-        out[c] = out[c].str.replace(",", ".", regex=False)
-        out[c] = pd.to_numeric(out[c], errors="coerce")
+        if c in out.columns:
+            out[c] = out[c].str.replace(",", ".", regex=False)
+            out[c] = pd.to_numeric(out[c], errors="coerce")
 
     antes = len(out)
     out = out.dropna(subset=["NR_LATITUDE", "NR_LONGITUDE"])
@@ -200,16 +206,21 @@ def obter_coordenadas(ano: int, uf: str,
 
 
 def juntar_coordenadas(df: pd.DataFrame, ano: int, uf: str,
+                       municipio: Optional[str] = None,
                        cd_municipio: Optional[str] = None,
                        cache_dir: Optional[str] = None) -> pd.DataFrame:
-    """Adiciona NR_LATITUDE / NR_LONGITUDE ao DataFrame de seções.
+    """Adiciona LATITUDE / LONGITUDE ao DataFrame de seções.
+
+    Aceita filtrar por nome do município (`municipio`) ou por código TSE
+    (`cd_municipio`). Se nenhum for passado, faz o join com todos os locais
+    da UF — pode gerar linhas duplicadas se houver códigos de local
+    repetidos entre municípios.
 
     Args:
         df:            DataFrame produzido por analysis.montar_tabela.
         ano, uf:       usados para buscar o dataset.
-        cd_municipio:  código TSE do município (para filtrar o dataset,
-                       que cobre o Brasil inteiro). Se None, tenta inferir
-                       cruzando zona/local com o dataset completo.
+        municipio:     nome do município (ex.: "OURO PRETO"), case-insensitive.
+        cd_municipio:  código TSE do município (ex.: "46698").
         cache_dir:     pasta de cache opcional.
     """
     df = df.copy()
@@ -218,8 +229,8 @@ def juntar_coordenadas(df: pd.DataFrame, ano: int, uf: str,
 
     coords = obter_coordenadas(ano, uf, cache_dir)
     if coords is None or coords.empty:
-        df["NR_LATITUDE"] = None
-        df["NR_LONGITUDE"] = None
+        df["LATITUDE"] = None
+        df["LONGITUDE"] = None
         return df
 
     coords = coords.rename(columns={
@@ -231,19 +242,36 @@ def juntar_coordenadas(df: pd.DataFrame, ano: int, uf: str,
     coords["zona"] = coords["zona"].astype(str)
     coords["local_votacao_id"] = coords["local_votacao_id"].astype(str)
 
-    # Se soubermos o CD_MUNICIPIO, filtra antes do merge — evita colisões
-    # entre municípios que por acaso compartilham (zona, local).
+    # ---- filtra por município (nome) ----
+    if municipio and "NM_MUNICIPIO" in coords.columns:
+        alvo = municipio.strip().upper()
+        antes = len(coords)
+        coords = coords[
+            coords["NM_MUNICIPIO"].astype(str).str.upper() == alvo
+        ].copy()
+        print(f"[geodata] filtro NM_MUNICIPIO='{alvo}': "
+              f"{len(coords)}/{antes} locais", file=sys.stderr)
+
+    # ---- filtra por município (código TSE) ----
     if cd_municipio is not None and "CD_MUNICIPIO" in coords.columns:
         antes = len(coords)
-        coords = coords[coords["CD_MUNICIPIO"].astype(str)
-                        == str(cd_municipio)].copy()
+        coords = coords[
+            coords["CD_MUNICIPIO"].astype(str) == str(cd_municipio)
+        ].copy()
         print(f"[geodata] filtro CD_MUNICIPIO={cd_municipio}: "
               f"{len(coords)}/{antes} locais", file=sys.stderr)
 
+    if coords.empty:
+        print("[geodata] aviso: filtro de município esvaziou os locais; "
+              "o join não vai produzir coordenadas.", file=sys.stderr)
+        df["LATITUDE"] = None
+        df["LONGITUDE"] = None
+        return df
+
     merged = df.merge(coords, on=["zona", "local_votacao_id"], how="left")
 
-    if "NR_LATITUDE" in merged.columns:
-        com = merged["NR_LATITUDE"].notna().sum()
+    if "LATITUDE" in merged.columns:
+        com = merged["LATITUDE"].notna().sum()
         print(f"[geodata] join: {com}/{len(merged)} seções com coordenadas",
               file=sys.stderr)
 
