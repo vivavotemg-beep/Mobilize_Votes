@@ -18,6 +18,7 @@ Abas:
 
 import os
 import glob
+import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -25,6 +26,7 @@ import plotly.express as px
 st.set_page_config(page_title="TSE BU — Painel", layout="wide")
 
 
+# ---------------------------------------------------------------- helpers
 @st.cache_data(show_spinner=False)
 def carregar_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -37,21 +39,40 @@ def carregar_csv(path: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False)
+def carregar_geodata(csv_path: str, ano: int, uf: str,
+                     municipio: str = "") -> pd.DataFrame:
+    """Junta coordenadas ao CSV. Cacheado por (csv, ano, uf, município)."""
+    df = carregar_csv(csv_path)
+    try:
+        from tse_bu import geodata
+        return geodata.juntar_coordenadas(df, ano, uf, municipio=municipio)
+    except Exception as exc:
+        df = df.copy()
+        df["LATITUDE"] = None
+        df["LONGITUDE"] = None
+        st.warning(f"Não foi possível obter coordenadas: {exc}")
+        return df
+
+
 def encontrar_csvs() -> list:
     if os.environ.get("TSE_BU_CSV"):
         return [os.environ["TSE_BU_CSV"]]
     return sorted(glob.glob("saida/*.csv"))
 
 
-def detectar_candidatos(df: pd.DataFrame) -> list:
-    """Descobre as duas colunas de candidatos no CSV.
+def municipio_do_csv(csv_path: str) -> str:
+    """Extrai o nome do município do nome do arquivo.
 
-    Ordem de tentativa:
-      1. formato novo: nomes começando com 'cand_'
-      2. formato antigo: nomes totalmente numéricos
-      3. estrutural: colunas imediatamente antes de 'outros_candidatos'
-      4. fallback: qualquer coluna que não seja conhecida
+    O main.py salva como '<slug>_urnas_<turno>turno_<ano>.csv',
+    então o slug é tudo antes de '_urnas'.
     """
+    base = os.path.basename(csv_path)
+    return base.split("_urnas")[0].replace("_", " ").upper()
+
+
+def detectar_candidatos(df: pd.DataFrame) -> list:
+    """Descobre as duas colunas de candidatos no CSV."""
     cand_prefix = [c for c in df.columns if c.startswith("cand_")]
     if len(cand_prefix) >= 2:
         return cand_prefix[:2]
@@ -76,6 +97,31 @@ def detectar_candidatos(df: pd.DataFrame) -> list:
     return sobra[:2] if len(sobra) >= 2 else []
 
 
+def label_candidato(col: str) -> str:
+    """Transforma 'cand_22' em 'Candidato 22'."""
+    if col.startswith("cand_"):
+        return f"Candidato {col[5:]}"
+    return col
+
+
+def calcular_zoom(lat_min, lat_max, lon_min, lon_max) -> float:
+    """Zoom aproximado para enquadrar os pontos visíveis."""
+    span = max(abs(lat_max - lat_min), abs(lon_max - lon_min))
+    if span < 0.005:
+        return 14
+    if span < 0.02:
+        return 13
+    if span < 0.05:
+        return 12
+    if span < 0.1:
+        return 11
+    if span < 0.5:
+        return 10
+    if span < 2:
+        return 8
+    return 6
+
+
 # ---------------- Sidebar ----------------
 st.sidebar.title("TSE BU — Painel")
 csvs = encontrar_csvs()
@@ -84,7 +130,15 @@ if not csvs:
              "aponte TSE_BU_CSV para um arquivo.")
     st.stop()
 
-csv_path = st.sidebar.selectbox("Arquivo CSV", csvs, index=0)
+if "csv_path" not in st.session_state or st.session_state["csv_path"] not in csvs:
+    st.session_state["csv_path"] = csvs[0]
+
+csv_path = st.sidebar.selectbox(
+    "Arquivo CSV", csvs,
+    index=csvs.index(st.session_state["csv_path"]),
+)
+st.session_state["csv_path"] = csv_path
+
 df = carregar_csv(csv_path)
 
 detectadas = detectar_candidatos(df)
@@ -98,17 +152,25 @@ if len(detectadas) < 2:
     st.stop()
 else:
     c1, c2 = detectadas
-    nome_c1, nome_c2 = c1, c2
+    nome_c1, nome_c2 = label_candidato(c1), label_candidato(c2)
 
 # ---------- Sidebar: Filtros ----------
 st.sidebar.markdown("### Filtros")
 zonas = sorted(df["zona"].dropna().unique().tolist())
 zonas_sel = st.sidebar.multiselect("Zonas", zonas, default=zonas)
-df = df[df["zona"].isin(zonas_sel)]
 
+if zonas_sel:
+    df = df[df["zona"].isin(zonas_sel)]
+
+max_aptos = int(df["aptos"].max()) if not df.empty else 1000
 min_aptos = st.sidebar.slider("Mínimo de eleitores aptos", 0,
-                              int(df["aptos"].max()), 0, step=10)
+                              max_aptos, 0, step=10)
 df = df[df["aptos"] >= min_aptos]
+
+if df.empty:
+    st.warning("Nenhuma seção passa pelos filtros atuais. "
+               "Ajuste as Zonas ou o mínimo de eleitores na barra lateral.")
+    st.stop()
 
 # ---------- Sidebar: Candidatos ----------
 st.sidebar.markdown("### Candidatos")
@@ -128,7 +190,7 @@ if len(opcoes) >= 2:
     c2 = st.sidebar.selectbox(
         "Candidato 2 (coluna)", opcoes,
         index=opcoes.index(c2) if c2 in opcoes else min(1, len(opcoes) - 1))
-    nome_c1, nome_c2 = c1, c2
+    nome_c1, nome_c2 = label_candidato(c1), label_candidato(c2)
 else:
     st.sidebar.warning("CSV não tem colunas de candidatos reconhecíveis.")
     c1 = c2 = None
@@ -156,14 +218,16 @@ validos = int(df["votos_validos"].sum())
 brancos = int(df["brancos"].sum())
 nulos = int(df["nulos"].sum())
 turnout = comp / aptos * 100 if aptos else 0
+abstencao = 100 - turnout if aptos else 0
 invalid = (brancos + nulos) / comp * 100 if comp else 0
 vpa = validos / aptos * 100 if aptos else 0
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Eleitores aptos", f"{aptos:,}")
 k2.metric("Comparecimento", f"{comp:,}", f"{turnout:.1f}%")
-k3.metric("Abstenções", f"{abst:,}", f"{100 - turnout:.1f}%", delta_color="inverse")
-k4.metric("Votos inválidos", f"{brancos + nulos:,}", f"{invalid:.1f}%", delta_color="inverse")
+k3.metric("Abstenções", f"{abst:,}", f"{abstencao:.1f}%", delta_color="inverse")
+k4.metric("Votos inválidos", f"{brancos + nulos:,}", f"{invalid:.1f}%",
+          delta_color="inverse")
 k5.metric("Válidos por apto", f"{vpa:.1f}%")
 
 st.divider()
@@ -177,9 +241,11 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 with tab1:
     st.subheader("Prioridade de mobilização")
     st.markdown(
-        "O eixo X mostra a **abstenção (%)**. O eixo Y mostra a **diferença entre "
-        "os dois candidatos** (quanto mais perto de 0, mais disputada a seção). "
-        "O tamanho da bolha é o **número absoluto de abstenções**."
+        "O eixo X mostra a **abstenção (%)**. O eixo Y mostra a **diferença "
+        "entre os dois candidatos** (quanto mais perto de 0, mais disputada "
+        "a seção). O tamanho da bolha é o **número absoluto de abstenções**. "
+        "A cor é a **prioridade de mobilização** — quanto mais escura, mais "
+        "vale a pena investir naquela seção."
     )
     fig = px.scatter(
         df, x="abstencao_pct", y="dif_pct_validos",
@@ -192,15 +258,16 @@ with tab1:
                 "prioridade_mobilizacao": "Prioridade"},
         height=550,
     )
+    fig.update_layout(coloraxis_colorbar_title="Prioridade")
     st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("**Top 15 seções por prioridade de mobilização**")
     top = df.sort_values("prioridade_mobilizacao", ascending=False).head(15)
     st.dataframe(
         top[["zona", "secao", "local_votacao", "aptos", "abstencoes",
-             "abstencao_pct", "dif_pct_validos", "prioridade_mobilizacao",
-             c1, c2]],
-        use_container_width=True, hide_index=True,
+             "abstencao_pct", c1, c2, "dif_pct_validos",
+             "prioridade_mobilizacao"]],
+        width="stretch", hide_index=True,
     )
 
 # ---------------- Tab 2: interactive geographic map ----------------
@@ -214,23 +281,38 @@ with tab2:
 
     ano_ = st.session_state.get("ano", 2026)
     uf_ = st.session_state.get("uf", "MG")
+    municipio = municipio_do_csv(csv_path)
 
-    try:
-        from tse_bu import geodata
-        df_geo = geodata.juntar_coordenadas(df.copy(), ano_, uf_)
-    except Exception as exc:
-        df_geo = df.copy()
-        df_geo["LATITUDE"] = None
-        df_geo["LONGITUDE"] = None
-        st.warning(f"Não foi possível obter coordenadas: {exc}")
+    df_geo = carregar_geodata(csv_path, int(ano_), uf_, municipio)
 
-    if "LATITUDE" not in df_geo.columns or df_geo["LATITUDE"].isna().all():
-        st.info(
-            "Sem coordenadas disponíveis para este ano/UF. "
-            "Veja a aba *Heatmap por seção* para uma visão alternativa."
+    # Alinha o tipo de 'zona' antes de filtrar (geodata casta para str)
+    if "zona" in df_geo.columns and df["zona"].dtype != df_geo["zona"].dtype:
+        df_geo["zona"] = df_geo["zona"].astype(df["zona"].dtype)
+
+    # Reaplica os filtros da sidebar
+    df_geo = df_geo[df_geo["zona"].isin(zonas_sel)]
+    df_geo = df_geo[df_geo["aptos"] >= min_aptos]
+
+    # Diagnóstico explícito
+    if "LATITUDE" not in df_geo.columns:
+        st.warning(
+            "O join de coordenadas não produziu a coluna `LATITUDE`. "
+            "Verifique o terminal — linhas `[geodata]` mostram o motivo. "
+            f"Ano/UF: {ano_}/{uf_} · município: {municipio}"
+        )
+    elif df_geo.empty:
+        st.warning(
+            "Os filtros da barra lateral excluíram todas as seções. "
+            "Verifique **Zonas** e **Mínimo de eleitores aptos**."
+        )
+    elif df_geo["LATITUDE"].isna().all():
+        st.warning(
+            f"O join retornou {len(df_geo)} linhas, mas nenhuma com "
+            "coordenadas. Possível incompatibilidade entre "
+            "`NR_LOCAL_VOTACAO` do bweb e do dataset de locais. "
+            "Verifique o terminal para a linha `[geodata] join: K/N`."
         )
     else:
-        # ---------- controles do mapa ----------
         m1, m2, m3, m4 = st.columns([1.2, 1.2, 1.2, 1])
         metricas_cor = {
             "Abstenção (%)": "abstencao_pct",
@@ -266,119 +348,129 @@ with tab2:
         base = df_geo.dropna(subset=["LATITUDE", "LONGITUDE"]).copy()
         base["secao"] = base["secao"].astype(str)
 
-        # ---------- agregação opcional ----------
-        if modo == "Por local":
-            agg = (
-                base.groupby(["local_votacao", "LATITUDE", "LONGITUDE"],
-                             as_index=False)
-                    .agg(
-                        aptos=("aptos", "sum"),
-                        comparecimentos=("comparecimentos", "sum"),
-                        abstencoes=("abstencoes", "sum"),
-                        votos_validos=("votos_validos", "sum"),
-                        brancos=("brancos", "sum"),
-                        nulos=("nulos", "sum"),
-                        secoes=("secao", "count"),
-                    )
-            )
-            agg["abstencao_pct"] = (agg["abstencoes"] / agg["aptos"] * 100).round(2)
-            agg["turnout_pct"] = (agg["comparecimentos"] / agg["aptos"] * 100).round(2)
-            agg["invalid_pct"] = ((agg["brancos"] + agg["nulos"])
-                                  / agg["comparecimentos"] * 100).round(2)
-
-            for c in (c1, c2):
-                if c in base.columns:
-                    agg = agg.merge(
-                        base.groupby(["local_votacao"], as_index=False)
-                            .agg(**{c: (c, "sum")}),
-                        on="local_votacao", how="left",
-                    )
-            if c1 in agg.columns and c2 in agg.columns:
-                agg["dif_votos"] = agg[c1] - agg[c2]
-                agg["dif_pct_validos"] = (
-                    agg["dif_votos"].abs()
-                    / agg["votos_validos"].replace(0, 1) * 100
-                ).round(2)
-                agg["potencial_virada"] = (
-                    (agg["abstencoes"] / agg["aptos"])
-                    * (1 - agg["dif_pct_validos"] / 100)
-                ).round(4)
-                agg["prioridade_mobilizacao"] = (
-                    agg["abstencoes"] * (1 - agg["dif_pct_validos"] / 100)
-                ).round(2)
-
-            plot_df = agg
-            hover_extra = {
-                "secoes": True, "aptos": True, "comparecimentos": True,
-                "abstencoes": True,
-                "abstencao_pct": ":.2f", "turnout_pct": ":.2f",
-                "invalid_pct": ":.2f",
-                c1: True, c2: True,
-                "dif_votos": True, "dif_pct_validos": ":.2f",
-                "prioridade_mobilizacao": ":.2f",
-                "LATITUDE": False, "LONGITUDE": False,
-            }
+        if base.empty:
+            st.info("Nenhuma seção com coordenadas após os filtros.")
         else:
-            plot_df = base
-            hover_extra = {
-                "zona": True, "secao": True,
-                "aptos": True, "comparecimentos": True, "abstencoes": True,
-                "abstencao_pct": ":.2f", "turnout_pct": ":.2f",
-                "invalid_pct": ":.2f", "validos_por_apto": ":.2f",
-                "votos_validos": True,
-                c1: True, c2: True,
-                "dif_votos": True, "dif_pct_validos": ":.2f",
-                "potencial_virada": ":.4f",
-                "prioridade_mobilizacao": ":.2f",
-                "LATITUDE": False, "LONGITUDE": False,
-            }
+            if modo == "Por local":
+                agg = (
+                    base.groupby(["local_votacao", "LATITUDE", "LONGITUDE"],
+                                 as_index=False)
+                        .agg(
+                            aptos=("aptos", "sum"),
+                            comparecimentos=("comparecimentos", "sum"),
+                            abstencoes=("abstencoes", "sum"),
+                            votos_validos=("votos_validos", "sum"),
+                            brancos=("brancos", "sum"),
+                            nulos=("nulos", "sum"),
+                            secoes=("secao", "count"),
+                        )
+                )
+                agg["abstencao_pct"] = (agg["abstencoes"] / agg["aptos"] * 100).round(2)
+                agg["turnout_pct"] = (agg["comparecimentos"] / agg["aptos"] * 100).round(2)
+                agg["invalid_pct"] = ((agg["brancos"] + agg["nulos"])
+                                      / agg["comparecimentos"] * 100).round(2)
 
-        # ---------- scatter_map (Plotly >= 6) ----------
-        fig_map = px.scatter_map(
-            plot_df,
-            lat="LATITUDE", lon="LONGITUDE",
-            size=size_col,
-            color=color_col,
-            hover_name="local_votacao",
-            hover_data=hover_extra,
-            color_continuous_scale="OrRd",
-            size_max=30, zoom=10, height=650,
-            labels={
-                "abstencao_pct": "Abstenção (%)",
-                "turnout_pct": "Comparecimento (%)",
-                "invalid_pct": "Inválidos (%)",
-                "dif_pct_validos": f"Diferença {nome_c1} vs {nome_c2} (%)",
-                "prioridade_mobilizacao": "Prioridade",
-                "abstencoes": "Abstenções",
-                "aptos": "Aptos",
-            },
-        )
-        fig_map.update_layout(
-            map=dict(style=basemap),
-            margin=dict(l=0, r=0, t=0, b=0),
-            coloraxis_colorbar=dict(title=cor_label),
-        )
-        st.plotly_chart(fig_map, use_container_width=True)
+                for c in (c1, c2):
+                    if c in base.columns:
+                        agg = agg.merge(
+                            base.groupby(["local_votacao"], as_index=False)
+                                .agg(**{c: (c, "sum")}),
+                            on="local_votacao", how="left",
+                        )
+                if c1 in agg.columns and c2 in agg.columns:
+                    agg["dif_votos"] = agg[c1] - agg[c2]
+                    agg["dif_pct_validos"] = (
+                        agg["dif_votos"].abs()
+                        / agg["votos_validos"].replace(0, 1) * 100
+                    ).round(2)
+                    agg["potencial_virada"] = (
+                        (agg["abstencoes"] / agg["aptos"])
+                        * (1 - agg["dif_pct_validos"] / 100)
+                    ).round(4)
+                    agg["prioridade_mobilizacao"] = (
+                        agg["abstencoes"] * (1 - agg["dif_pct_validos"] / 100)
+                    ).round(2)
 
-        # ---------- tabela sincronizada abaixo do mapa ----------
-        st.markdown("**Top 15 pontos no mapa (ordenados pela métrica de cor)**")
-        top_map = plot_df.sort_values(color_col, ascending=False).head(15)
-        cols_show = ["local_votacao"]
-        for extra in ("zona", "secao", "aptos", "abstencoes", "abstencao_pct",
-                      "turnout_pct", "invalid_pct", c1, c2,
-                      "dif_pct_validos", "prioridade_mobilizacao"):
-            if extra in top_map.columns:
-                cols_show.append(extra)
-        st.dataframe(top_map[cols_show], use_container_width=True,
-                     hide_index=True)
+                plot_df = agg
+                hover_extra = {
+                    "secoes": True, "aptos": True, "comparecimentos": True,
+                    "abstencoes": True,
+                    "abstencao_pct": ":.2f", "turnout_pct": ":.2f",
+                    "invalid_pct": ":.2f",
+                    c1: True, c2: True,
+                    "dif_votos": True, "dif_pct_validos": ":.2f",
+                    "prioridade_mobilizacao": ":.2f",
+                    "LATITUDE": False, "LONGITUDE": False,
+                }
+            else:
+                plot_df = base
+                hover_extra = {
+                    "zona": True, "secao": True,
+                    "aptos": True, "comparecimentos": True, "abstencoes": True,
+                    "abstencao_pct": ":.2f", "turnout_pct": ":.2f",
+                    "invalid_pct": ":.2f", "validos_por_apto": ":.2f",
+                    "votos_validos": True,
+                    c1: True, c2: True,
+                    "dif_votos": True, "dif_pct_validos": ":.2f",
+                    "potencial_virada": ":.4f",
+                    "prioridade_mobilizacao": ":.2f",
+                    "LATITUDE": False, "LONGITUDE": False,
+                }
 
-        # ---------- download do que está no mapa ----------
-        st.download_button(
-            "Baixar dados do mapa (CSV)",
-            data=plot_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"mapa_{modo.lower().replace(' ', '_')}.csv",
-            mime="text/csv",
-        )
+            lat_c = float(plot_df["LATITUDE"].mean())
+            lon_c = float(plot_df["LONGITUDE"].mean())
+            zoom = calcular_zoom(
+                plot_df["LATITUDE"].min(), plot_df["LATITUDE"].max(),
+                plot_df["LONGITUDE"].min(), plot_df["LONGITUDE"].max(),
+            )
+
+            fig_map = px.scatter_map(
+                plot_df,
+                lat="LATITUDE", lon="LONGITUDE",
+                size=size_col,
+                color=color_col,
+                hover_name="local_votacao",
+                hover_data=hover_extra,
+                color_continuous_scale="OrRd",
+                size_max=30,
+                height=650,
+                labels={
+                    "abstencao_pct": "Abstenção (%)",
+                    "turnout_pct": "Comparecimento (%)",
+                    "invalid_pct": "Inválidos (%)",
+                    "dif_pct_validos": f"Diferença {nome_c1} vs {nome_c2} (%)",
+                    "prioridade_mobilizacao": "Prioridade",
+                    "abstencoes": "Abstenções",
+                    "aptos": "Aptos",
+                },
+            )
+            fig_map.update_layout(
+                map=dict(
+                    style=basemap,
+                    center=dict(lat=lat_c, lon=lon_c),
+                    zoom=zoom,
+                ),
+                margin=dict(l=0, r=0, t=0, b=0),
+                coloraxis_colorbar=dict(title=cor_label),
+            )
+            st.plotly_chart(fig_map, use_container_width=True)
+
+            st.markdown("**Top 15 pontos no mapa (ordenados pela métrica de cor)**")
+            top_map = plot_df.sort_values(color_col, ascending=False).head(15)
+            cols_show = ["local_votacao"]
+            for extra in ("zona", "secao", "aptos", "abstencoes", "abstencao_pct",
+                          "turnout_pct", "invalid_pct", c1, c2,
+                          "dif_pct_validos", "prioridade_mobilizacao"):
+                if extra in top_map.columns:
+                    cols_show.append(extra)
+            st.dataframe(top_map[cols_show], width="stretch", hide_index=True)
+
+            st.download_button(
+                "Baixar dados do mapa (CSV)",
+                data=plot_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"mapa_{modo.lower().replace(' ', '_')}.csv",
+                mime="text/csv",
+            )
 
 # ---------------- Tab 3: section heatmap ----------------
 with tab3:
@@ -387,35 +479,51 @@ with tab3:
         "Cada célula é uma seção. Linhas = zona, colunas = seção. "
         "Cor = abstenção (%). Útil quando não há coordenadas."
     )
+
+    MAX_COLS = 60
     pivot = df.pivot_table(index="zona", columns="secao",
                            values="abstencao_pct", aggfunc="mean")
     if pivot.empty:
         st.info("Sem dados para exibir.")
     else:
+        if pivot.shape[1] > MAX_COLS:
+            st.caption(
+                f"Exibindo as primeiras {MAX_COLS} seções de "
+                f"{pivot.shape[1]} (para legibilidade). Use os filtros "
+                f"da barra lateral para reduzir o conjunto."
+            )
+            pivot = pivot.iloc[:, :MAX_COLS]
+
         fig_hm = px.imshow(
             pivot, aspect="auto", color_continuous_scale="OrRd",
             labels=dict(x="Seção", y="Zona", color="Abstenção (%)"),
-            height=600,
+            height=max(400, 60 + 20 * len(pivot)),
         )
         st.plotly_chart(fig_hm, use_container_width=True)
 
         st.markdown("**Abstenções absolutas por zona × seção**")
         pivot_abs = df.pivot_table(index="zona", columns="secao",
                                    values="abstencoes", aggfunc="sum")
+        if pivot_abs.shape[1] > MAX_COLS:
+            pivot_abs = pivot_abs.iloc[:, :MAX_COLS]
         fig_hm2 = px.imshow(
             pivot_abs, aspect="auto", color_continuous_scale="Reds",
             labels=dict(x="Seção", y="Zona", color="Abstenções"),
-            height=600,
+            height=max(400, 60 + 20 * len(pivot_abs)),
         )
         st.plotly_chart(fig_hm2, use_container_width=True)
 
 # ---------------- Tab 4: comparison ----------------
 with tab4:
     st.subheader(f"{nome_c1} vs {nome_c2} — votos por seção")
+
     df_melt = df.melt(
         id_vars=["zona", "secao", "local_votacao"],
         value_vars=[c1, c2], var_name="candidato", value_name="votos",
     )
+    df_melt["candidato"] = df_melt["candidato"].map(
+        {c1: nome_c1, c2: nome_c2})
+
     fig4 = px.histogram(
         df_melt, x="votos", color="candidato", barmode="overlay",
         nbins=40, opacity=0.7, height=450,
@@ -424,9 +532,12 @@ with tab4:
     st.plotly_chart(fig4, use_container_width=True)
 
     st.markdown("**Dispersão: votos cand1 vs cand2**")
+    aptos_safe = df["aptos"].clip(lower=1)
+    size_scaled = np.log10(aptos_safe)
     fig5 = px.scatter(
-        df, x=c1, y=c2, color="abstencao_pct", size="aptos",
-        hover_data=["zona", "secao", "local_votacao"],
+        df.assign(_size=size_scaled),
+        x=c1, y=c2, color="abstencao_pct", size="_size",
+        hover_data=["zona", "secao", "local_votacao", "aptos"],
         color_continuous_scale="Viridis",
         labels={c1: nome_c1, c2: nome_c2, "abstencao_pct": "Abstenção (%)"},
         height=500,
@@ -436,7 +547,7 @@ with tab4:
 # ---------------- Tab 5: table ----------------
 with tab5:
     st.subheader("Tabela completa")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
     st.download_button(
         "Baixar CSV filtrado",
         data=df.to_csv(index=False).encode("utf-8-sig"),
