@@ -8,7 +8,7 @@ Exemplos:
     python main.py --uf BA --cidade "SALVADOR" --ano 2026 --turno 1 \
         --cand1 13 --cand2 22 --cargo governador
 """
-
+import sys
 import argparse
 import os
 import tempfile
@@ -22,9 +22,7 @@ def parse_args():
     p.add_argument("--cidade", required=True, help="Nome do município (ex.: OURO PRETO)")
     p.add_argument("--ano", type=int, default=2026, help="Ano da eleição (default: 2026)")
     p.add_argument("--turno", type=int, default=1, choices=[1, 2], help="Turno (default: 1)")
-    p.add_argument("--cargo", default="presidente",
-                   choices=list(config.CARGOS.keys()) + ["outro"],
-                   help="Cargo em disputa (default: presidente)")
+    p.add_argument("--cargo", default="presidente",choices=list(config.CARGOS.keys()) + ["outro"],help="Cargo em disputa (default: presidente)")
     p.add_argument("--cargo-codigo", help="Código numérico do cargo (se --cargo outro)")
     p.add_argument("--cand1", required=True, help="Número do candidato 1 do 2º turno (ex.: 22)")
     p.add_argument("--cand2", required=True, help="Número do candidato 2 do 2º turno (ex.: 13)")
@@ -32,6 +30,9 @@ def parse_args():
     p.add_argument("--workers", type=int, default=16, help="Conexões paralelas no download")
     p.add_argument("--cache", help="Pasta de cache do ZIP da UF (default: temp do sistema)")
     p.add_argument("--somente-csv", action="store_true", help="Pula a geração dos PDFs")
+    p.add_argument("--relatorio", action="store_true",help="Gera o relatório HTML ao final do pipeline.")
+    p.add_argument("--pdf", action="store_true",help="Gera também o PDF do relatório (implica --relatorio).")
+    p.add_argument("--abrir", action="store_true",help="Abre o relatório no navegador ao final.")
     return p.parse_args()
 
 
@@ -98,7 +99,54 @@ def main():
             "dif_pct_validos", "potencial_virada"]
     print(f"\nTop {analysis.TOP_N} seções por potencial de virada:")
     print(resumo["top10_potencial"][cols].to_string(index=False))
+
+    # ---------------- relatório automático ----------------
+    if args.relatorio or args.pdf or args.abrir:
+        relatorio = os.path.join(
+            args.saida,
+            f"relatorio_{slug}_{args.turno}turno_{args.ano}.html",
+        )
+        cmd = [
+            sys.executable, "report.py",
+            "--csv", csv_path,
+            "--uf", args.uf,
+            "--cidade", cidade,
+            "--ano", str(args.ano),
+            "--turno", str(args.turno),
+            "--cargo", args.cargo,
+            "--saida", relatorio,
+        ]
+        if args.pdf:
+            cmd.append("--pdf")
+        if args.abrir:
+            cmd.append("--abrir")
+
+        print(f"\n[relatório] gerando {relatorio}...")
+        try:
+            import subprocess
+            subprocess.run(cmd, check=True)
+        except Exception as exc:
+            print(f"[aviso] relatório não gerado: {exc}")
+
     print("\nDica: rode `streamlit run dashboard.py` para abrir o painel interativo.")
+
+        # Gera o relatório HTML junto com o CSV
+    try:
+        import subprocess
+        relatorio = os.path.join(args.saida, f"relatorio_{slug}_{args.turno}turno_{args.ano}.html")
+        subprocess.run([
+            "python", "report.py",
+            "--csv", csv_path,
+            "--uf", args.uf,
+            "--cidade", cidade,
+            "--ano", str(args.ano),
+            "--turno", str(args.turno),
+            "--cargo", args.cargo,
+            "--saida", relatorio,
+        ], check=True)
+        print(f"  -> Relatório: {relatorio}")
+    except Exception as exc:
+        print(f"  [aviso] relatório não gerado: {exc}")
 
 
 if __name__ == "__main__":
