@@ -16,6 +16,7 @@ import tempfile
 from tse_bu import analysis, bu_data, config, downloader, pdfgen
 
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="Coleta boletins de urna (bweb) do TSE por município.")
     p.add_argument("--uf", required=True, help="UF de 2 letras (ex.: MG)")
@@ -165,7 +166,7 @@ def main():
             exportar_excel(df, csv_path)
         except Exception as exc:
             print(f"  [aviso] Excel não gerado: {exc}")
-            
+
     if not args.somente_csv:
         pasta_pdf = os.path.join(args.saida, f"boletins_{slug}")
         pdfgen.gerar_todos(cidade, args.uf, secoes, candidatos,
