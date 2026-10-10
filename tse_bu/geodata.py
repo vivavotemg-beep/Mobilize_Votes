@@ -127,6 +127,12 @@ def obter_coordenadas(ano: int, uf: str,
     path = _cache_path(ano, uf, cache_dir)
     if os.path.exists(path):
         df = pd.read_csv(path, dtype=str)
+        # Reconverte as coordenadas para numérico — o dtype=str acima é
+        # necessário para preservar zeros à esquerda em NR_ZONA e
+        # NR_LOCAL_VOTACAO, mas deixa LATITUDE/LONGITUDE como string.
+        for c in ("NR_LATITUDE", "NR_LONGITUDE", "LATITUDE", "LONGITUDE"):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
         print(f"[geodata] cache hit: {path} ({len(df)} locais)",
               file=sys.stderr)
         return df
@@ -267,6 +273,23 @@ def juntar_coordenadas(df: pd.DataFrame, ano: int, uf: str,
         df["LATITUDE"] = None
         df["LONGITUDE"] = None
         return df
+
+    # O dataset de locais tem uma linha por SEÇÃO; várias linhas com a
+    # mesma (zona, local). Deduplica para uma linha por local antes do
+    # merge — senão o join vira produto cartesiano.
+    antes = len(coords)
+    coords = (coords
+              .sort_values(["zona", "local_votacao_id"])
+              .drop_duplicates(subset=["zona", "local_votacao_id"],
+                               keep="first"))
+    print(f"[geodata] dedupe por (zona, local): {len(coords)}/{antes} linhas",
+          file=sys.stderr)
+
+
+        # Garante que as coordenadas são numéricas antes do merge
+    for c in ("LATITUDE", "LONGITUDE"):
+        if c in coords.columns:
+            coords[c] = pd.to_numeric(coords[c], errors="coerce")
 
     merged = df.merge(coords, on=["zona", "local_votacao_id"], how="left")
 

@@ -51,6 +51,63 @@ def _fig_html(fig, first=False):
         config={"displayModeBar": False, "responsive": True},
     )
 
+def build_censo(df: pd.DataFrame) -> str:
+    """Seção do Censo 2022, se as colunas existirem."""
+    cols = [c for c in df.columns if c.startswith("censo_")]
+    tem_dados = ("censo_total_pessoas" in df.columns
+                 and df["censo_total_pessoas"].notna().any())
+    if not cols or not tem_dados:
+        return (
+            "<section><h3>Censo 2022</h3>"
+            "<p>Sem dados do Censo para esta seleção. O `geocensobr` "
+            "não conseguiu consultar os setores censitários — verifique "
+            "o terminal do `main.py`.</p></section>"
+        )
+
+    total_p = int(df["censo_total_pessoas"].sum(skipna=True))
+    total_d = int(df["censo_total_domicilios"].sum(skipna=True))
+    media = df["censo_media_moradores"].mean(skipna=True)
+
+    html = ["<section>", "<h3>Censo 2022 — contexto socioeconômico</h3>",
+            "<p class='desc'>Dados do IBGE por setor censitário, cruzados "
+            "com os locais de votação.</p>",
+            "<div class='kpis'>"]
+    html.append(_kpi_row("Pessoas nos setores", f"{total_p:,}"))
+    html.append(_kpi_row("Domicílios", f"{total_d:,}"))
+    if pd.notna(media):
+        html.append(_kpi_row("Média moradores/domicílio", f"{media:.2f}"))
+    html.append("</div>")
+
+    if "censo_tipo_setor_desc" in df.columns:
+        tipos = (df.groupby("censo_tipo_setor_desc", as_index=False)
+                   .agg(secoes=("secao", "count")))
+        fig = px.bar(tipos, x="secoes", y="censo_tipo_setor_desc",
+                     orientation="h",
+                     labels={"secoes": "Nº de seções",
+                             "censo_tipo_setor_desc": ""},
+                     height=300,
+                     title="Distribuição por tipo de setor censitário")
+        html.append(_fig_html(fig))
+
+    if "censo_total_pessoas" in df.columns and "abstencao_pct" in df.columns:
+        sub = df.dropna(subset=["censo_total_pessoas"])
+        if not sub.empty:
+            fig = px.scatter(
+                sub, x="censo_total_pessoas", y="abstencao_pct",
+                size="aptos", color="prioridade_mobilizacao",
+                hover_data=["zona", "secao", "local_votacao",
+                            "censo_bairro", "censo_municipio"],
+                color_continuous_scale="Reds",
+                labels={"censo_total_pessoas": "População do setor",
+                        "abstencao_pct": "Abstenção (%)",
+                        "prioridade_mobilizacao": "Prioridade"},
+                height=400,
+                title="Abstenção × população do setor censitário",
+            )
+            html.append(_fig_html(fig))
+
+    html.append("</section>")
+    return "\n".join(html)
 
 def _read_csv(path):
     df = pd.read_csv(path)
@@ -156,7 +213,7 @@ def build_map(df, uf, ano, cidade):
         return "<section><h3>Mapa</h3><p>Módulo geodata não disponível.</p></section>"
 
     try:
-        df_geo = geodata.juntar_coordenadas(df.copy(), ano, uf)
+        df_geo = geodata.juntar_coordenadas(df.copy(), ano, uf, municipio=cidade)
     except Exception as exc:
         return f"<section><h3>Mapa</h3><p>Não foi possível obter coordenadas: {exc}</p></section>"
 
@@ -237,6 +294,90 @@ def build_scatter(df, nome_c1, nome_c2):
         height=550,
     )
     return f"<section>{_fig_html(fig)}</section>"
+
+def build_perfil(df: pd.DataFrame) -> str:
+    """Seção de perfil do eleitorado, se as colunas existirem."""
+    cols = [c for c in df.columns if c.startswith("perfil_")]
+    if not cols:
+        return (
+            "<section><h3>Perfil do eleitorado</h3>"
+            "<p>CSV sem colunas de perfil. Rode <code>main.py --perfil</code> "
+            "para gerar.</p></section>"
+        )
+
+    total = int(df["perfil_total"].sum())
+
+    def _pct(col: str) -> float:
+        if col not in df.columns or total == 0:
+            return 0.0
+        return df[col].sum() / total * 100
+
+    # Cabeçalho com KPIs
+    html = ["<section>", "<h3>Perfil do eleitorado (TSE)</h3>",
+            "<p class='desc'>Composição demográfica das seções analisadas, "
+            "segundo o Perfil do Eleitorado por Seção Eleitoral do TSE.</p>",
+            "<div class='kpis'>"]
+    html.append(_kpi_row("Total de eleitores", f"{total:,}"))
+    html.append(_kpi_row("Mulheres", f"{_pct('perfil_genero_feminino'):.1f}%"))
+    html.append(_kpi_row("Jovens 16–24", f"{_pct('perfil_jovens_16_24'):.1f}%"))
+    html.append(_kpi_row("Idosos 60+", f"{_pct('perfil_idosos_60_mais'):.1f}%"))
+    html.append(_kpi_row("PCD", f"{_pct('perfil_pcd'):.1f}%"))
+    html.append("</div>")
+
+    # Distribuição por faixa etária
+    cols_idade = [c for c in df.columns
+                  if c.startswith("perfil_idade_") and c.endswith("_pct")]
+    if cols_idade:
+        agregado = df[cols_idade].multiply(df["perfil_total"], axis=0).sum()
+        if agregado.sum() > 0:
+            resumo = (agregado / agregado.sum() * 100).reset_index()
+            resumo.columns = ["faixa", "pct"]
+            resumo["faixa"] = (resumo["faixa"]
+                               .str.replace("perfil_idade_", "", regex=False)
+                               .str.replace("_pct", "", regex=False))
+            fig = px.bar(resumo, x="faixa", y="pct",
+                         labels={"faixa": "Faixa etária",
+                                 "pct": "% do eleitorado"},
+                         height=350,
+                         title="Distribuição por faixa etária")
+            html.append(_fig_html(fig))
+
+    # Grau de instrução
+    cols_ins = [c for c in df.columns
+                if c.startswith("perfil_instrucao_") and c.endswith("_pct")]
+    if cols_ins:
+        agregado = df[cols_ins].multiply(df["perfil_total"], axis=0).sum()
+        if agregado.sum() > 0:
+            resumo = (agregado / agregado.sum() * 100).reset_index()
+            resumo.columns = ["grau", "pct"]
+            resumo["grau"] = (resumo["grau"]
+                              .str.replace("perfil_instrucao_", "", regex=False)
+                              .str.replace("_pct", "", regex=False))
+            resumo = resumo.sort_values("pct")
+            fig = px.bar(resumo, x="pct", y="grau", orientation="h",
+                         labels={"pct": "% do eleitorado", "grau": ""},
+                         height=350,
+                         title="Grau de instrução")
+            html.append(_fig_html(fig))
+
+    # Gênero
+    cols_gen = [c for c in df.columns
+                if c.startswith("perfil_genero_") and c.endswith("_pct")]
+    if cols_gen:
+        agregado = df[cols_gen].multiply(df["perfil_total"], axis=0).sum()
+        if agregado.sum() > 0:
+            resumo = (agregado / agregado.sum() * 100).reset_index()
+            resumo.columns = ["genero", "pct"]
+            resumo["genero"] = (resumo["genero"]
+                                .str.replace("perfil_genero_", "", regex=False)
+                                .str.replace("_pct", "", regex=False))
+            fig = px.pie(resumo, names="genero", values="pct",
+                         height=350, hole=0.4,
+                         title="Distribuição por gênero")
+            html.append(_fig_html(fig))
+
+    html.append("</section>")
+    return "\n".join(html)
 
 
 def build_footer():
@@ -372,6 +513,16 @@ def main():
     print("[5/6] Heatmap e dispersão...")
     html.append(build_heatmap(df))
     html.append(build_scatter(df, nome_c1, nome_c2))
+
+        # ---- NOVO: perfil do eleitorado (se o CSV tiver as colunas) ----
+    if any(c.startswith("perfil_") for c in df.columns):
+        print("[5b/6] Perfil do eleitorado...")
+        html.append(build_perfil(df))
+
+    # ---- NOVO: Censo 2022 (se o CSV tiver as colunas) ----
+    if any(c.startswith("censo_") for c in df.columns):
+        print("[5c/6] Censo 2022...")
+        html.append(build_censo(df))
 
     print("[6/6] Rodapé...")
     html.append(build_footer())

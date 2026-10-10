@@ -33,6 +33,8 @@ def parse_args():
     p.add_argument("--relatorio", action="store_true",help="Gera o relatório HTML ao final do pipeline.")
     p.add_argument("--pdf", action="store_true",help="Gera também o PDF do relatório (implica --relatorio).")
     p.add_argument("--abrir", action="store_true",help="Abre o relatório no navegador ao final.")
+    p.add_argument("--perfil", action="store_true",help="Enriquece o CSV com o perfil do eleitorado do TSE.")
+    p.add_argument("--censo", action="store_true",help="Enriquece o CSV com dados do Censo 2022 (IBGE).")
     return p.parse_args()
 
 
@@ -61,6 +63,17 @@ def main():
     print(f"[4/4] {len(secoes)} seções encontradas. Gerando análise...")
     df = analysis.montar_tabela(secoes, candidatos, args.cand1, args.cand2)
 
+    if args.perfil:
+        from tse_bu import perfil_eleitorado
+        df = perfil_eleitorado.juntar_perfil(df, args.ano, args.uf)
+
+    if args.censo:
+        from tse_bu import geodata, censo
+        # Junta coordenadas (se ainda não estiverem no df)
+        municipio = cidade.upper()
+        df = geodata.juntar_coordenadas(df, args.ano, args.uf,municipio=municipio)
+        # Enriquece com o Censo
+        df = censo.enriquecer_com_censo(df)
     # Nomes de exibição (podem ser "FLAVIO BOLSONARO", "LULA", etc.)
     nome_c1_display = candidatos.get(args.cand1, args.cand1)
     nome_c2_display = candidatos.get(args.cand2, args.cand2)
