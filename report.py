@@ -207,15 +207,24 @@ def build_table(df, cols, titulo, descricao, n):
 
 
 def build_map(df, uf, ano, cidade):
-    try:
-        from tse_bu import geodata
-    except ImportError:
-        return "<section><h3>Mapa</h3><p>Módulo geodata não disponível.</p></section>"
-
-    try:
-        df_geo = geodata.juntar_coordenadas(df.copy(), ano, uf, municipio=cidade)
-    except Exception as exc:
-        return f"<section><h3>Mapa</h3><p>Não foi possível obter coordenadas: {exc}</p></section>"
+    """Mapa das seções. Se o CSV já tem LATITUDE/LONGITUDE (o main.py
+    --censo grava), não faz join de novo — só usa o que está lá."""
+    # Se o CSV já tem coordenadas preenchidas, usa direto
+    if ("LATITUDE" in df.columns and "LONGITUDE" in df.columns
+            and df["LATITUDE"].notna().any()):
+        df_geo = df.copy()
+    else:
+        try:
+            from tse_bu import geodata
+        except ImportError:
+            return ("<section><h3>Mapa</h3><p>Módulo geodata não disponível."
+                    "</p></section>")
+        try:
+            df_geo = geodata.juntar_coordenadas(df.copy(), ano, uf,
+                                                municipio=cidade)
+        except Exception as exc:
+            return (f"<section><h3>Mapa</h3><p>Não foi possível obter "
+                    f"coordenadas: {exc}</p></section>")
 
     if "LATITUDE" not in df_geo.columns or df_geo["LATITUDE"].isna().all():
         return ("<section><h3>Mapa</h3><p>Sem coordenadas disponíveis para "
@@ -239,8 +248,14 @@ def build_map(df, uf, ano, cidade):
         title=f"Abstenção por seção — {cidade} ({len(base)} pontos)",
     )
     fig.update_layout(
-        map=dict(style="carto-positron"),
+        map=dict(
+            style="carto-positron",
+            center=dict(lat=-20.3856, lon=-43.5035),
+            zoom=11,
+        ),
         margin=dict(l=0, r=0, t=40, b=0),
+        height=600,
+        width=None,   # deixa o Plotly calcular a partir do container
         coloraxis_colorbar=dict(title="Abstenção (%)"),
     )
     return f"<section>{_fig_html(fig)}</section>"
@@ -475,6 +490,10 @@ def main():
     html = ["<!DOCTYPE html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">",
             f"<title>Relatório — {cidade} {args.ano}</title>",
             f"<style>{CSS}</style></head><body>"]
+        # Embute o plotly.js uma vez, para que todos os gráficos do relatório
+    # possam renderizar (o HTML é autocontido, sem CDN).
+    from plotly.offline import get_plotlyjs
+    html.append(f"<script>{get_plotlyjs()}</script>")
     html.append(build_cover(cidade, args.uf, args.ano, args.turno, args.cargo))
     html.append(build_kpis(df, c1, c2, nome_c1, nome_c2))
 
@@ -526,6 +545,32 @@ def main():
 
     print("[6/6] Rodapé...")
     html.append(build_footer())
+
+    # Corrige a renderização do mapa: o MapLibre do Plotly inicializa antes
+    # do navegador medir o container, então o mapa só aparece após um resize.
+    # Este script força um resize em dois momentos (load e depois de um
+    # pequeno delay) para garantir que o mapa enquadre corretamente.
+    html.append("""
+<script>
+(function () {
+  function refreshPlotly() {
+    var divs = document.querySelectorAll('.plotly-graph-div');
+    divs.forEach(function (d) {
+      if (window.Plotly && window.Plotly.Plots) {
+        try { window.Plotly.Plots.resize(d); } catch (e) {}
+      }
+    });
+    window.dispatchEvent(new Event('resize'));
+  }
+  window.addEventListener('load', function () {
+    setTimeout(refreshPlotly, 200);
+    setTimeout(refreshPlotly, 800);
+  });
+  // Também dispara ao redimensionar a janela (útil para Ctrl+P → PDF)
+  window.addEventListener('beforeprint', refreshPlotly);
+})();
+</script>
+""")
     html.append("</body></html>")
 
     os.makedirs(os.path.dirname(saida) or ".", exist_ok=True)
