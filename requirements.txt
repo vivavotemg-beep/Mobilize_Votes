@@ -5,3 +5,4 @@ plotly>=5.20
 playwright>=1.40        # para gerar PDF com gráficos
 certifi>=2023.0
 geocensobr>=0.1
+openpyxl>=3.1

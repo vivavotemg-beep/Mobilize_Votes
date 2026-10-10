@@ -247,9 +247,10 @@ k5.metric("Válidos por apto", f"{vpa:.1f}%")
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
     ["🎯 Onde mobilizar", "🗺️ Mapa geográfico", "🔥 Heatmap por seção",
      "📊 Comparação", "📈 Perfil do eleitorado", "🏘️ Censo 2022",
+     "🎯 Matriz de priorização", "🟥 Treemap por zona",
      "📋 Tabela"]
 )
 
@@ -679,6 +680,96 @@ with tab5:
                 height=500,
             )
             st.plotly_chart(fig_corr, use_container_width=True)
+                # --- Radar demográfico: compara até 3 seções ---
+        st.markdown("---")
+        st.markdown("**Radar demográfico — comparação entre seções**")
+        st.markdown(
+            "Selecione até 3 seções para comparar os perfis lado a lado. "
+            "Cada eixo é um percentual do eleitorado da seção (0–100%)."
+        )
+
+        # Monta os rótulos das seções disponíveis
+        secoes_disponiveis = df.apply(
+            lambda r: f"{r['zona']}-{r['secao']}", axis=1
+        ).tolist()
+        secoes_radar = st.multiselect(
+            "Selecione até 3 seções",
+            options=secoes_disponiveis,
+            max_selections=3,
+            default=secoes_disponiveis[:2] if len(secoes_disponiveis) >= 2 else [],
+            key="radar_secoes",
+        )
+
+        if secoes_radar:
+            categorias = [
+                ("perfil_genero_feminino_pct", "% Mulheres"),
+                ("perfil_jovens_16_24_pct", "% Jovens 16–24"),
+                ("perfil_idosos_60_mais_pct", "% Idosos 60+"),
+                ("perfil_instrucao_superior_completo_pct", "% Superior"),
+                ("perfil_instrucao_analfabeto_pct", "% Analfabeto"),
+                ("perfil_raca_parda_pct", "% Parda"),
+                ("perfil_raca_preta_pct", "% Preta"),
+                ("perfil_pcd_pct", "% PCD"),
+            ]
+            # Filtra só as colunas que existem no CSV
+            categorias = [(c, l) for c, l in categorias if c in df.columns]
+
+            if len(categorias) < 3:
+                st.warning(
+                    "Poucas colunas de perfil disponíveis para desenhar "
+                    "o radar. Rode o `main.py` com `--perfil`."
+                )
+            else:
+                import plotly.graph_objects as go
+                cores = ["#c0392b", "#2980b9", "#27ae60"]
+                fig_radar = go.Figure()
+                for i, slug in enumerate(secoes_radar):
+                    z, s = slug.split("-")
+                    row = df[(df["zona"].astype(str) == z) &
+                             (df["secao"].astype(str) == s)]
+                    if row.empty:
+                        continue
+                    vals = []
+                    for c, _ in categorias:
+                        v = row.iloc[0].get(c, 0)
+                        vals.append(float(v) if pd.notna(v) else 0.0)
+                    vals_plot = vals + [vals[0]]
+                    cats_plot = [l for _, l in categorias] + [categorias[0][1]]
+                    fig_radar.add_trace(go.Scatterpolar(
+                        r=vals_plot,
+                        theta=cats_plot,
+                        fill="toself",
+                        name=f"Zona {z} · Seção {s}",
+                        line=dict(color=cores[i % len(cores)]),
+                        opacity=0.6,
+                    ))
+                fig_radar.update_layout(
+                    polar=dict(
+                        radialaxis=dict(visible=True, range=[0, 100],
+                                        ticksuffix="%"),
+                    ),
+                    height=550,
+                    showlegend=True,
+                    legend=dict(orientation="h", y=-0.1),
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
+
+                # Tabela comparativa com os valores
+                st.markdown("**Valores por eixo**")
+                linhas_tab = []
+                for c, label in categorias:
+                    linha = {"Dimensão": label}
+                    for slug in secoes_radar:
+                        z, s = slug.split("-")
+                        row = df[(df["zona"].astype(str) == z) &
+                                 (df["secao"].astype(str) == s)]
+                        v = row.iloc[0].get(c, 0) if not row.empty else 0
+                        linha[f"Zona {z} · Seção {s}"] = (
+                            f"{float(v):.1f}%" if pd.notna(v) else "—"
+                        )
+                    linhas_tab.append(linha)
+                st.dataframe(pd.DataFrame(linhas_tab),
+                             width="stretch", hide_index=True)
 
 
 # ---------------- Tab 6: Censo 2022 ----------------
@@ -758,8 +849,130 @@ with tab6:
         st.dataframe(df[cols_existentes].dropna(
             subset=["censo_total_pessoas"] if "censo_total_pessoas" in df else []),
             width="stretch", hide_index=True)
-# ---------------- Tab 5: table ----------------
+
+
+# ---------------- Tab 7: quadrant matrix ----------------
 with tab7:
+    st.subheader("Matriz de priorização")
+    st.markdown(
+        "Cada ponto é uma seção. As **linhas tracejadas** marcam a mediana "
+        "de cada eixo. O **quadrante superior direito** (alta abstenção + "
+        "disputa acirrada) é a prioridade máxima de mobilização."
+    )
+
+    if df.empty:
+        st.info("Sem dados após os filtros.")
+    else:
+        med_abst = df["abstencao_pct"].median()
+        med_dif = df["dif_pct_validos"].median()
+
+        # Classifica cada seção em um quadrante
+        def _quadrante(row):
+            alta_abst = row["abstencao_pct"] >= med_abst
+            acirrado = row["dif_pct_validos"] <= med_dif
+            if alta_abst and acirrado:
+                return "Prioridade máxima"
+            if alta_abst and not acirrado:
+                return "Alta abstenção, disputa definida"
+            if not alta_abst and acirrado:
+                return "Baixa abstenção, disputa acirrada"
+            return "Baixa prioridade"
+
+        df_q = df.copy()
+        df_q["quadrante"] = df_q.apply(_quadrante, axis=1)
+
+        fig = px.scatter(
+            df_q,
+            x="abstencao_pct",
+            y="dif_pct_validos",
+            color="quadrante",
+            size="aptos",
+            hover_data=["zona", "secao", "local_votacao",
+                        "abstencoes", c1, c2, "prioridade_mobilizacao"],
+            color_discrete_map={
+                "Prioridade máxima": "#c0392b",
+                "Alta abstenção, disputa definida": "#e67e22",
+                "Baixa abstenção, disputa acirrada": "#2980b9",
+                "Baixa prioridade": "#95a5a6",
+            },
+            height=600,
+            labels={"abstencao_pct": "Abstenção (%)",
+                    "dif_pct_validos": f"Diferença {nome_c1} vs {nome_c2} (%)",
+                    "quadrante": "Quadrante"},
+        )
+        fig.add_vline(x=med_abst, line_dash="dash", line_color="grey")
+        fig.add_hline(y=med_dif, line_dash="dash", line_color="grey")
+        fig.update_layout(legend=dict(orientation="h", y=-0.15))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Sumário por quadrante
+        st.markdown("**Resumo por quadrante**")
+        resumo_q = (df_q.groupby("quadrante", as_index=False)
+                    .agg(secoes=("secao", "count"),
+                         aptos=("aptos", "sum"),
+                         abstencoes=("abstencoes", "sum"),
+                         votos_validos=("votos_validos", "sum"),
+                         abstencao_media=("abstencao_pct", "mean")))
+        resumo_q["abstencao_media"] = resumo_q["abstencao_media"].round(2)
+        st.dataframe(resumo_q, width="stretch", hide_index=True)
+
+        # Top 15 do quadrante "Prioridade máxima"
+        st.markdown("**Top 15 seções do quadrante 'Prioridade máxima'**")
+        prio = (df_q[df_q["quadrante"] == "Prioridade máxima"]
+                .sort_values("prioridade_mobilizacao", ascending=False)
+                .head(15))
+        cols_prio = ["zona", "secao", "local_votacao", "aptos",
+                     "abstencoes", "abstencao_pct", "dif_pct_validos",
+                     c1, c2, "prioridade_mobilizacao"]
+        cols_prio = [c for c in cols_prio if c in prio.columns]
+        st.dataframe(prio[cols_prio], width="stretch", hide_index=True)
+
+
+# ---------------- Tab 8: treemap ----------------
+with tab8:
+    st.subheader("Treemap por zona e seção")
+    st.markdown(
+        "Cada retângulo é uma seção, agrupada por zona. O **tamanho** é "
+        "proporcional aos eleitores aptos; a **cor** é a abstenção (%). "
+        "Retângulos grandes e escuros = maior contingente de faltantes."
+    )
+
+    if df.empty:
+        st.info("Sem dados após os filtros.")
+    else:
+        df_tree = df.copy()
+        df_tree["zona"] = df_tree["zona"].astype(str)
+        df_tree["secao"] = df_tree["secao"].astype(str)
+        df_tree["rotulo"] = "Seção " + df_tree["secao"]
+
+        fig_tree = px.treemap(
+            df_tree,
+            path=["zona", "rotulo"],
+            values="aptos",
+            color="abstencao_pct",
+            color_continuous_scale="OrRd",
+            hover_data={"abstencao_pct": ":.2f",
+                        "abstencoes": True,
+                        "prioridade_mobilizacao": ":.2f",
+                        "aptos": True},
+            labels={"abstencao_pct": "Abstenção (%)",
+                    "zona": "Zona",
+                    "rotulo": "Seção"},
+            height=650,
+        )
+        fig_tree.update_layout(
+            margin=dict(l=0, r=0, t=30, b=0),
+            coloraxis_colorbar=dict(title="Abstenção (%)"),
+        )
+        st.plotly_chart(fig_tree, use_container_width=True)
+
+        # Legenda explicativa por tipo de seção
+        st.caption(
+            "Clique em uma zona para expandir. O tamanho do retângulo é "
+            "proporcional ao número de eleitores aptos."
+        )
+# ---------------- Tab 9: table ----------------
+with tab9:
     st.subheader("Tabela completa")
     st.dataframe(df, width="stretch", hide_index=True)
     st.download_button(
@@ -772,4 +985,4 @@ with tab7:
 st.caption(
     "Fonte: dados abertos do TSE (bweb + locais de votação). "
     "Métricas: turnout, invalid_pct, validos_por_apto, prioridade_mobilizacao."
-)
+) 

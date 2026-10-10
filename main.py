@@ -37,6 +37,73 @@ def parse_args():
     p.add_argument("--censo", action="store_true",help="Enriquece o CSV com dados do Censo 2022 (IBGE).")
     return p.parse_args()
 
+def exportar_excel(df, csv_path):
+    """Gera um XLSX com múltiplas abas a partir do DataFrame de urnas.
+
+    Abas:
+      - Urnas: dados completos
+      - Top_Prioridade: top 20 por prioridade de mobilização
+      - Resumo_Zona: agregado por zona
+      - Perfil: perfil demográfico agregado (se o CSV tiver perfil_*)
+    """
+    import pandas as pd
+
+    xlsx_path = csv_path.replace(".csv", ".xlsx")
+
+    # Colunas numéricas de coordenadas não fazem sentido no Excel
+    df_x = df.drop(columns=[c for c in ("LATITUDE", "LONGITUDE")
+                            if c in df.columns], errors="ignore")
+
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        # Aba 1: dados completos
+        df_x.to_excel(writer, sheet_name="Urnas", index=False)
+
+        # Aba 2: top 20 por prioridade
+        if "prioridade_mobilizacao" in df_x.columns:
+            top = (df_x.sort_values("prioridade_mobilizacao", ascending=False)
+                   .head(20))
+            top.to_excel(writer, sheet_name="Top_Prioridade", index=False)
+
+        # Aba 3: resumo por zona
+        if "zona" in df_x.columns:
+            resumo_zona = (df_x.groupby("zona", as_index=False)
+                           .agg(secoes=("secao", "count"),
+                                aptos=("aptos", "sum"),
+                                comparecimentos=("comparecimentos", "sum"),
+                                abstencoes=("abstencoes", "sum"),
+                                votos_validos=("votos_validos", "sum")))
+            resumo_zona["abstencao_pct"] = (
+                resumo_zona["abstencoes"] / resumo_zona["aptos"] * 100
+            ).round(2)
+            resumo_zona.to_excel(writer, sheet_name="Resumo_Zona", index=False)
+
+        # Aba 4: perfil agregado
+        cols_perfil = [c for c in df_x.columns
+                       if c.startswith("perfil_") and c.endswith("_pct")]
+        if cols_perfil and "perfil_total" in df_x.columns:
+            total = df_x["perfil_total"].sum()
+            if total > 0:
+                perfil_agg = pd.DataFrame({
+                    "dimensao": [c.replace("perfil_", "").replace("_pct", "")
+                                 for c in cols_perfil],
+                    "pct": [(df_x[c] * df_x["perfil_total"]).sum() / total
+                            for c in cols_perfil],
+                })
+                perfil_agg["pct"] = perfil_agg["pct"].round(2)
+                perfil_agg.to_excel(writer, sheet_name="Perfil", index=False)
+
+        # Aba 5: Censo agregado (se existir)
+        cols_censo = [c for c in df_x.columns if c.startswith("censo_")]
+        if cols_censo and "censo_total_pessoas" in df_x.columns:
+            censo_agg = (df_x.dropna(subset=["censo_total_pessoas"])
+                         .groupby("censo_tipo_setor_desc", as_index=False)
+                         .agg(secoes=("secao", "count"),
+                              pessoas=("censo_total_pessoas", "sum"),
+                              domicilios=("censo_total_domicilios", "sum")))
+            censo_agg.to_excel(writer, sheet_name="Censo", index=False)
+
+    print(f"  -> Excel: {xlsx_path}")
+    return xlsx_path
 
 def main():
     args = parse_args()
@@ -93,6 +160,12 @@ def main():
     df.sort_values("abstencao_pct", ascending=False).to_csv(csv_path, index=False, encoding="utf-8-sig")
     print(f"  -> CSV: {csv_path}")
 
+    if not args.somente_csv or getattr(args, "excel", False):
+        try:
+            exportar_excel(df, csv_path)
+        except Exception as exc:
+            print(f"  [aviso] Excel não gerado: {exc}")
+            
     if not args.somente_csv:
         pasta_pdf = os.path.join(args.saida, f"boletins_{slug}")
         pdfgen.gerar_todos(cidade, args.uf, secoes, candidatos,
