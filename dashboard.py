@@ -18,6 +18,7 @@ Abas:
 
 import os
 import glob
+import sys
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -42,8 +43,22 @@ def carregar_csv(path: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def carregar_geodata(csv_path: str, ano: int, uf: str,
                      municipio: str = "") -> pd.DataFrame:
-    """Junta coordenadas ao CSV. Cacheado por (csv, ano, uf, município)."""
+    """Adiciona coordenadas ao CSV, se ainda não estiverem presentes.
+
+    O `main.py --censo` já grava LATITUDE e LONGITUDE no CSV (porque
+    o geodata roda antes do censo). Nesse caso não precisa juntar de
+    novo — só devolve o CSV como está.
+    """
     df = carregar_csv(csv_path)
+
+    # Se o CSV já tem coordenadas preenchidas, nada a fazer
+    if ("LATITUDE" in df.columns and "LONGITUDE" in df.columns
+            and df["LATITUDE"].notna().any()):
+        print("[geodata] CSV já tem LATITUDE/LONGITUDE; join ignorado",
+              file=sys.stderr)
+        return df
+
+    # Caso contrário, faz o join como antes
     try:
         from tse_bu import geodata
         return geodata.juntar_coordenadas(df, ano, uf, municipio=municipio)
@@ -232,9 +247,10 @@ k5.metric("Válidos por apto", f"{vpa:.1f}%")
 
 st.divider()
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     ["🎯 Onde mobilizar", "🗺️ Mapa geográfico", "🔥 Heatmap por seção",
-     "📊 Comparação", "📋 Tabela"]
+     "📊 Comparação", "📈 Perfil do eleitorado", "🏘️ Censo 2022",
+     "📋 Tabela"]
 )
 
 # ---------------- Tab 1: priority ----------------
@@ -544,8 +560,206 @@ with tab4:
     )
     st.plotly_chart(fig5, use_container_width=True)
 
-# ---------------- Tab 5: table ----------------
+# ---------------- Tab 5: perfil do eleitorado ----------------
 with tab5:
+    st.subheader("Perfil do eleitorado")
+    st.markdown(
+        "Composição demográfica das seções filtradas, segundo o **Perfil do "
+        "eleitorado por seção eleitoral** do TSE. Colunas geradas quando o "
+        "`main.py` roda com `--perfil`."
+    )
+
+    colunas_perfil = [c for c in df.columns if c.startswith("perfil_")]
+    tem_dados_perfil = ("perfil_total" in df.columns
+                        and df["perfil_total"].notna().any())
+
+    if not colunas_perfil or not tem_dados_perfil:
+        st.warning(
+            "Este CSV não tem colunas de perfil. Rode o `main.py` com "
+            "`--perfil` para gerar, ou use um CSV já enriquecido."
+        )
+    else:
+        # --- KPIs agregados ---
+        total = int(df["perfil_total"].sum())
+        pct_fem = (df["perfil_genero_feminino"].sum() / total * 100
+                   if "perfil_genero_feminino" in df.columns and total else 0)
+        pct_jov = (df["perfil_jovens_16_24"].sum() / total * 100
+                   if "perfil_jovens_16_24" in df.columns and total else 0)
+        pct_ido = (df["perfil_idosos_60_mais"].sum() / total * 100
+                   if "perfil_idosos_60_mais" in df.columns and total else 0)
+        pct_pcd = (df["perfil_pcd"].sum() / total * 100
+                   if "perfil_pcd" in df.columns and total else 0)
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Total de eleitores", f"{total:,}")
+        k2.metric("Mulheres", f"{pct_fem:.1f}%")
+        k3.metric("Jovens 16–24", f"{pct_jov:.1f}%")
+        k4.metric("Idosos 60+", f"{pct_ido:.1f}%")
+        k5.metric("PCD", f"{pct_pcd:.1f}%")
+
+        # --- Faixa etária ---
+        st.markdown("**Distribuição por faixa etária**")
+        cols_idade = [c for c in df.columns
+                      if c.startswith("perfil_idade_") and c.endswith("_pct")]
+        if cols_idade:
+            agregado = df[cols_idade].multiply(df["perfil_total"], axis=0).sum()
+            if agregado.sum() > 0:
+                resumo = (agregado / agregado.sum() * 100).reset_index()
+                resumo.columns = ["faixa", "pct"]
+                resumo["faixa"] = (resumo["faixa"]
+                                   .str.replace("perfil_idade_", "", regex=False)
+                                   .str.replace("_pct", "", regex=False))
+                fig_idade = px.bar(
+                    resumo, x="faixa", y="pct",
+                    labels={"faixa": "Faixa etária",
+                            "pct": "% do eleitorado"},
+                    height=380,
+                )
+                st.plotly_chart(fig_idade, use_container_width=True)
+
+        # --- Gênero ---
+        st.markdown("**Distribuição por gênero**")
+        cols_gen = [c for c in df.columns
+                    if c.startswith("perfil_genero_") and c.endswith("_pct")]
+        if cols_gen:
+            agregado = df[cols_gen].multiply(df["perfil_total"], axis=0).sum()
+            if agregado.sum() > 0:
+                resumo = (agregado / agregado.sum() * 100).reset_index()
+                resumo.columns = ["genero", "pct"]
+                resumo["genero"] = (resumo["genero"]
+                                    .str.replace("perfil_genero_", "", regex=False)
+                                    .str.replace("_pct", "", regex=False))
+                fig_gen = px.pie(resumo, names="genero", values="pct",
+                                 height=380, hole=0.4)
+                st.plotly_chart(fig_gen, use_container_width=True)
+
+        # --- Instrução ---
+        st.markdown("**Grau de instrução**")
+        cols_ins = [c for c in df.columns
+                    if c.startswith("perfil_instrucao_") and c.endswith("_pct")]
+        if cols_ins:
+            agregado = df[cols_ins].multiply(df["perfil_total"], axis=0).sum()
+            if agregado.sum() > 0:
+                resumo = (agregado / agregado.sum() * 100).reset_index()
+                resumo.columns = ["grau", "pct"]
+                resumo["grau"] = (resumo["grau"]
+                                  .str.replace("perfil_instrucao_", "", regex=False)
+                                  .str.replace("_pct", "", regex=False))
+                resumo = resumo.sort_values("pct", ascending=True)
+                fig_ins = px.bar(resumo, x="pct", y="grau", orientation="h",
+                                 labels={"pct": "% do eleitorado", "grau": ""},
+                                 height=380)
+                st.plotly_chart(fig_ins, use_container_width=True)
+
+        # --- Top 15 seções por % de jovens ---
+        if "perfil_jovens_16_24_pct" in df.columns:
+            st.markdown("**Top 15 seções por % de jovens (16–24)**")
+            top_jov = df.sort_values("perfil_jovens_16_24_pct",
+                                     ascending=False).head(15)
+            cols_mostrar = ["zona", "secao", "local_votacao",
+                            "perfil_total", "perfil_jovens_16_24_pct",
+                            "abstencao_pct", "prioridade_mobilizacao"]
+            cols_mostrar = [c for c in cols_mostrar if c in top_jov.columns]
+            st.dataframe(top_jov[cols_mostrar], width="stretch",
+                         hide_index=True)
+
+        # --- Correlação abstenção × % de jovens ---
+        if ("perfil_jovens_16_24_pct" in df.columns
+                and "abstencao_pct" in df.columns):
+            st.markdown("**Abstenção × % de jovens**")
+            fig_corr = px.scatter(
+                df, x="perfil_jovens_16_24_pct", y="abstencao_pct",
+                size="perfil_total", color="prioridade_mobilizacao",
+                hover_data=["zona", "secao", "local_votacao",
+                            "perfil_total", "aptos"],
+                color_continuous_scale="Reds",
+                labels={"perfil_jovens_16_24_pct": "% de jovens (16–24)",
+                        "abstencao_pct": "Abstenção (%)",
+                        "prioridade_mobilizacao": "Prioridade"},
+                height=500,
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+
+# ---------------- Tab 6: Censo 2022 ----------------
+with tab6:
+    st.subheader("Censo 2022 — contexto socioeconômico")
+    st.markdown(
+        "Dados do **Censo 2022 (IBGE)** por setor censitário, cruzados com "
+        "os locais de votação via `geocensobr`. Cada seção herda os atributos "
+        "do setor censitário onde seu local de votação está inserido."
+    )
+
+    colunas_censo = [c for c in df.columns if c.startswith("censo_")]
+    tem_dados = ("censo_total_pessoas" in df.columns
+                 and df["censo_total_pessoas"].notna().any())
+    if not colunas_censo or not tem_dados:
+        st.warning(
+            "Nenhuma seção tem dados do Censo. Isso pode acontecer se o "
+            "`geocensobr` não conseguiu consultar os setores censitários. "
+            "Verifique o terminal onde o `main.py` rodou — a linha "
+            "`[censo] N/203 pontos com dados do Censo` mostra quantos "
+            "pontos retornaram."
+        )
+        st.stop()
+    else:
+        # --- KPIs ---
+        total_pessoas = int(df["censo_total_pessoas"].sum(skipna=True))
+        total_dom = int(df["censo_total_domicilios"].sum(skipna=True))
+        media_mor = df["censo_media_moradores"].mean(skipna=True)
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total de pessoas (setores)", f"{total_pessoas:,}")
+        k2.metric("Total de domicílios", f"{total_dom:,}")
+        k3.metric("Média de moradores/domicílio",
+                  f"{media_mor:.2f}" if pd.notna(media_mor) else "—")
+        k4.metric("Seções com dados do Censo",
+                  f"{df['censo_total_pessoas'].notna().sum()}/{len(df)}")
+
+        # --- Distribuição por tipo de setor ---
+        if "censo_tipo_setor_desc" in df.columns:
+            st.markdown("**Distribuição por tipo de setor censitário**")
+            tipos = (df.groupby("censo_tipo_setor_desc", as_index=False)
+                       .agg(secoes=("secao", "count"),
+                            aptos=("aptos", "sum")))
+            fig_tipos = px.bar(
+                tipos, x="secoes", y="censo_tipo_setor_desc",
+                orientation="h",
+                labels={"secoes": "Nº de seções",
+                        "censo_tipo_setor_desc": ""},
+                height=350,
+            )
+            st.plotly_chart(fig_tipos, use_container_width=True)
+
+        # --- Abstenção × total de pessoas no setor ---
+        if "censo_total_pessoas" in df.columns and "abstencao_pct" in df.columns:
+            st.markdown("**Abstenção × total de pessoas no setor**")
+            fig_censo = px.scatter(
+                df.dropna(subset=["censo_total_pessoas"]),
+                x="censo_total_pessoas", y="abstencao_pct",
+                size="aptos", color="prioridade_mobilizacao",
+                hover_data=["zona", "secao", "local_votacao",
+                            "censo_bairro", "censo_municipio"],
+                color_continuous_scale="Reds",
+                labels={"censo_total_pessoas": "População do setor",
+                        "abstencao_pct": "Abstenção (%)",
+                        "prioridade_mobilizacao": "Prioridade"},
+                height=500,
+            )
+            st.plotly_chart(fig_censo, use_container_width=True)
+
+        # --- Tabela detalhada ---
+        st.markdown("**Seções com dados do Censo**")
+        cols_censo_mostrar = ["zona", "secao", "local_votacao",
+                              "censo_total_pessoas", "censo_total_domicilios",
+                              "censo_media_moradores", "censo_tipo_setor_desc",
+                              "censo_bairro", "abstencao_pct"]
+        cols_existentes = [c for c in cols_censo_mostrar if c in df.columns]
+        st.dataframe(df[cols_existentes].dropna(
+            subset=["censo_total_pessoas"] if "censo_total_pessoas" in df else []),
+            width="stretch", hide_index=True)
+# ---------------- Tab 5: table ----------------
+with tab7:
     st.subheader("Tabela completa")
     st.dataframe(df, width="stretch", hide_index=True)
     st.download_button(
