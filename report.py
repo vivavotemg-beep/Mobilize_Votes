@@ -22,10 +22,23 @@ import argparse
 import base64
 import datetime as dt
 import os
+import re
 
 import pandas as pd
 import plotly.express as px
 import plotly.io as pio
+
+
+def _cidade_do_nome_csv(path: str) -> str:
+    """Extrai o nome do município do nome do CSV.
+
+    'saida/ouro_preto_urnas_1turno_2026.csv' -> 'Ouro Preto'
+    (preserva nomes compostos; aceita o sufixo '_urnas' ou '_secoes').
+    """
+    base = os.path.basename(path)
+    m = re.match(r"^(.*?)_(?:urnas|secoes)(?:_|\.|$)", base, re.IGNORECASE)
+    slug = m.group(1) if m else base.split("_")[0]
+    return slug.replace("_", " ").replace("-", " ").title()
 
 
 # ---------------------------------------------------------------- helpers
@@ -250,7 +263,9 @@ def build_map(df, uf, ano, cidade):
     fig.update_layout(
         map=dict(
             style="carto-positron",
-            center=dict(lat=-20.3856, lon=-43.5035),
+            # Centro dinâmico: o município processado, nunca hardcoded.
+            center=dict(lat=float(base["LATITUDE"].mean()),
+                        lon=float(base["LONGITUDE"].mean())),
             zoom=11,
         ),
         margin=dict(l=0, r=0, t=40, b=0),
@@ -481,7 +496,7 @@ def main():
         raise SystemExit("Não consegui identificar as colunas de candidatos.")
     c1, c2 = cands
 
-    cidade = args.cidade or os.path.basename(args.csv).split("_")[0].replace("-", " ").title()
+    cidade = args.cidade or _cidade_do_nome_csv(args.csv)
     nome_c1, nome_c2 = c1.replace("cand_", "Candidato "), c2.replace("cand_", "Candidato ")
 
     saida = args.saida or os.path.join(os.path.dirname(args.csv), "relatorio.html")
