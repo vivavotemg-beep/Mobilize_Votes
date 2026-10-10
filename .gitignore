@@ -1,0 +1,90 @@
+# ============================================================
+# TSE BU Collector — .gitignore
+# ============================================================
+
+# ---------- Dados gerados / pesados ----------
+saida/
+saida_test/
+*.zip
+*.csv
+!requirements*.txt
+
+# CSV/PDF de boletins (mesmo se colocados fora de saida/)
+boletins_*/
+boletins_*.zip
+*_urnas_*turno_*.csv
+
+# ---------- Cache do TSE / geodata ----------
+# (o cache real fica em /tmp/tse_bu_cache, mas ignoramos
+#  qualquer pasta local de cache também)
+.cache/
+tse_bu_cache/
+locais_votacao_*.csv
+bweb_*.zip
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtualenvs
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# ---------- Testes / cobertura ----------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ---------- Notebooks / editores ----------
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---------- Streamlit ----------
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# ---------- Env / secrets ----------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ---------- Logs / temporários ----------
+*.log
+*.tmp
+*.bak
+*~

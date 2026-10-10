@@ -1,0 +1,7 @@
+fpdf>=1.7
+pandas>=2.0
+streamlit>=1.35
+plotly>=5.20
+playwright>=1.40        # para gerar PDF com gráficos
+certifi>=2023.0
+geocensobr>=0.1
