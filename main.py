@@ -143,23 +143,7 @@ def main():
 
     print("\nDica: rode `streamlit run dashboard.py` para abrir o painel interativo.")
 
-        # Gera o relatório HTML junto com o CSV
-    try:
-        import subprocess
-        relatorio = os.path.join(args.saida, f"relatorio_{slug}_{args.turno}turno_{args.ano}.html")
-        subprocess.run([
-            "python", "report.py",
-            "--csv", csv_path,
-            "--uf", args.uf,
-            "--cidade", cidade,
-            "--ano", str(args.ano),
-            "--turno", str(args.turno),
-            "--cargo", args.cargo,
-            "--saida", relatorio,
-        ], check=True)
-        print(f"  -> Relatório: {relatorio}")
-    except Exception as exc:
-        print(f"  [aviso] relatório não gerado: {exc}")
+
 
 
 if __name__ == "__main__":
